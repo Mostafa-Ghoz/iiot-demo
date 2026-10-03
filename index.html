@@ -72,6 +72,10 @@ button:focus-visible{outline:3px solid var(--blue-2);outline-offset:2px}
 .bar i{position:absolute;inset:0 auto 0 0;background:var(--blue);opacity:.25;transition:width .3s}
 .bar.right i{background:var(--ok);opacity:.4}
 .bar > span{position:relative;display:flex;justify-content:space-between;padding:8px 12px;font-size:.92rem;gap:10px}
+.calc{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.calc label{display:flex;flex-direction:column;gap:4px;font-size:.88rem;color:var(--muted)}
+.calc input{font:inherit;font-size:1.05rem;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);
+  background:var(--panel);color:var(--ink);width:100%}
 .hostonly{display:none}
 body.host .hostonly{display:block}
 body.host .studentonly{display:none}
@@ -99,8 +103,9 @@ label.chk{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:.92r
       <div class="url" id="joinUrl"></div>
     </section>
     <section class="panel">
-      <h2>Exit quiz</h2>
-      <p class="muted" id="hostQuizInfo">Quiz not started.</p>
+      <h2>Class activity</h2>
+      <select id="activity" style="font:inherit;padding:6px;border-radius:8px;width:100%;margin-bottom:10px"></select>
+      <p class="muted" id="hostQuizInfo">Not started.</p>
       <div class="btns">
         <button id="qPrev" class="ghost">Back</button>
         <button id="qOpen">Start quiz</button>
@@ -148,6 +153,22 @@ label.chk{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:.92r
       <div class="log" id="log"></div>
     </section>
 
+
+    <section class="panel">
+      <h2>Data-rate calculator</h2>
+      <div class="calc">
+        <label>Machines<input type="number" id="cM" value="50" min="1" max="10000"></label>
+        <label>Samples per second<input type="number" id="cF" value="6250" min="1" max="100000"></label>
+        <label>Bytes per sample<input type="number" id="cB" value="2" min="1" max="8"></label>
+        <label>Features sent per second<input type="number" id="cK" value="4" min="1" max="100"></label>
+      </div>
+      <div class="stats">
+        <div class="stat"><b id="cRaw">--</b><span>Raw data, whole plant</span></div>
+        <div class="stat"><b id="cRawDay">--</b><span>Raw data per day</span></div>
+        <div class="stat"><b id="cFeatDay">--</b><span>Features per day (4 B each)</span></div>
+        <div class="stat"><b id="cRatio">--</b><span>Times less data at the edge</span></div>
+      </div>
+    </section>
     <section class="panel" id="quizPanel" hidden>
       <h2 id="quizHead">Exit quiz</h2>
       <div id="quizQ" style="font-weight:600;font-size:1.1rem"></div>
@@ -175,14 +196,34 @@ const ROOM = (qs.get("room") || CONFIG.room).replace(/[^A-Za-z0-9_-]/g, "");
 const T = s => `bue/iiot/${ROOM}/${s}`;
 const CID = Math.random().toString(36).slice(2, 10);
 if (HOST) document.body.classList.add("host");
+const ACT0 = qs.get("act");
 
-const QUIZ = [
+/* ---------- activities: add a set here for each lecture ---------- */
+const SETS = {
+  "l1": {name: "Lecture 1: Exit quiz", items: [
   {q:"Which best defines IoT?", o:["Any device with a microcontroller","Physical objects that sense, communicate and act over the Internet","A cloud database","A battery-powered sensor"], a:1},
   {q:"MQTT and LoRa belong to which layer?", o:["Perception","Transport","Processing","Application"], a:1},
   {q:"What does IIoT prioritise over consumer IoT?", o:["Low cost","Convenience","Reliability, safety and uptime","Appearance"], a:2},
   {q:"A motor loop must react within 5 ms. Where should the decision run?", o:["Cloud","On the ESP32 (edge)","Dashboard","ERP system"], a:1},
   {q:"Which gives the earliest warning of a bearing fault?", o:["Room temperature","Wi-Fi signal strength","Vibration with repeating impacts","Motor nameplate"], a:2}
-];
+]},
+  "l2-vote": {name: "Lecture 2: Edge, fog or cloud?", items: [
+    {q:"A light curtain is broken: stop the machine now.", o:["Edge","Fog","Cloud"], a:0},
+    {q:"Show the whole line's efficiency on a screen beside it.", o:["Edge","Fog","Cloud"], a:1},
+    {q:"Retrain the fault model on 2 years of data from 3 factories.", o:["Edge","Fog","Cloud"], a:2},
+    {q:"Keep logging while the Internet is down for 2 hours.", o:["Edge","Fog","Cloud"], a:1},
+    {q:"Detect a bearing fault from 6.25 kHz vibration.", o:["Edge","Fog","Cloud"], a:0}
+  ]},
+  "l2-exit": {name: "Lecture 2: Exit quiz", items: [
+    {q:"Which layer turns a temperature into a digital number?", o:["Perception","Transport","Processing","Application"], a:0},
+    {q:"In our demo, what does the MQTT broker do?", o:["Measures temperature","Routes messages between publishers and subscribers","Draws the dashboard","Stores firmware"], a:1},
+    {q:"A 12-bit ADC with a 3.3 V range has a step of about:", o:["3.3 mV","0.8 mV","0.08 mV","12 mV"], a:1},
+    {q:"Sending features instead of raw vibration mainly saves:", o:["Sensor cost","Bandwidth and storage","Sampling rate","Safety"], a:1},
+    {q:"The first phase of the IoT design process is:", o:["Choosing the microcontroller","Defining requirements","Building the dashboard","Writing firmware"], a:1}
+  ]}
+};
+let SETKEY = "l1", QUIZ = SETS.l1.items;
+const key = q => `${SETKEY}:${q}`;
 
 const $ = id => document.getElementById(id);
 const log = m => { $("log").textContent = m; };
@@ -270,11 +311,14 @@ client.on("message", (topic, buf) => {
       if (simulating && d) simAck(d);
       break;
     case "presence": if (d && d.cid) people.set(d.cid, Date.now()); break;
-    case "quiz/state": if (d) { quiz = d; renderQuiz(); } break;
+    case "quiz/state":
+      if (d) { quiz = d; SETKEY = SETS[d.set] ? d.set : "l1"; QUIZ = SETS[SETKEY].items; renderQuiz(); }
+      break;
     case "quiz/ans":
       if (HOST && d && d.cid != null) {
-        if (!votes.has(d.q)) votes.set(d.q, new Map());
-        if (!(quiz.q === d.q && quiz.phase === "reveal")) votes.get(d.q).set(d.cid, d.a);
+        const k = `${d.set || "l1"}:${d.q}`;
+        if (!votes.has(k)) votes.set(k, new Map());
+        if (!(key(quiz.q) === k && quiz.phase === "reveal")) votes.get(k).set(d.cid, d.a);
         renderQuiz();
       }
       break;
@@ -356,29 +400,60 @@ if (HOST) {
   window.addEventListener("beforeunload", () => client.publish(T("status"), "offline", {retain: true}));
 }
 
+
+/* ---------- data-rate calculator ---------- */
+function fmtB(b) {
+  const u = ["B", "kB", "MB", "GB", "TB"]; let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return (b >= 100 ? b.toFixed(0) : b >= 10 ? b.toFixed(1) : b.toFixed(2)) + " " + u[i];
+}
+function calc() {
+  const m = Math.max(1, +$("cM").value || 1), fz = Math.max(1, +$("cF").value || 1);
+  const by = Math.max(1, +$("cB").value || 1), k = Math.max(1, +$("cK").value || 1);
+  const raw = m * fz * by, feat = m * k * 4;
+  $("cRaw").textContent = fmtB(raw) + "/s";
+  $("cRawDay").textContent = fmtB(raw * 86400);
+  $("cFeatDay").textContent = fmtB(feat * 86400);
+  $("cRatio").textContent = Math.round(raw / feat).toLocaleString() + "×";
+}
+["cM", "cF", "cB", "cK"].forEach(id => $(id).addEventListener("input", calc));
+calc();
+
 /* ---------- quiz ---------- */
-function pubQuiz(state) { client.publish(T("quiz/state"), JSON.stringify(state), {retain: true}); }
+if (HOST) {
+  $("activity").onchange = () => renderQuiz();
+  $("activity").innerHTML = Object.entries(SETS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join("");
+  if (ACT0 && SETS[ACT0]) $("activity").value = ACT0;
+}
+function pubQuiz(state) {
+  state.set = state.set || SETKEY;
+  client.publish(T("quiz/state"), JSON.stringify(state), {retain: true});
+}
 $("qOpen").onclick = () => {
-  const next = (quiz.phase === "idle" || quiz.phase === "done" || quiz.q < 0) ? 0 : quiz.q + 1;
-  if (next >= QUIZ.length) { pubQuiz({q: -1, phase: "done"}); return; }
-  pubQuiz({q: next, phase: "open"});
+  const starting = quiz.phase === "idle" || quiz.phase === "done" || quiz.q < 0 || quiz.set !== $("activity").value;
+  const set = starting ? $("activity").value : SETKEY;
+  const next = starting ? 0 : quiz.q + 1;
+  if (starting) { for (const k of [...votes.keys()]) if (k.startsWith(set + ":")) votes.delete(k); }
+  if (next >= SETS[set].items.length) { pubQuiz({set, q: -1, phase: "done"}); return; }
+  pubQuiz({set, q: next, phase: "open"});
 };
 $("qReveal").onclick = () => { if (quiz.q >= 0) pubQuiz({q: quiz.q, phase: "reveal"}); };
-$("qReset").onclick = () => { votes.clear(); pubQuiz({q: -1, phase: "idle"}); };
+$("qReset").onclick = () => { votes.clear(); pubQuiz({set: $("activity").value, q: -1, phase: "idle"}); };
 $("qPrev").onclick = () => { if (quiz.q > 0) pubQuiz({q: quiz.q - 1, phase: "reveal"}); };
 
 function renderQuiz() {
   const panel = $("quizPanel");
   if (HOST) {
-    $("qReveal").disabled = !(quiz.phase === "open");
-    $("qOpen").textContent = quiz.phase === "idle" || quiz.phase === "done" ? "Start quiz"
+    $("qReveal").disabled = !(quiz.phase === "open") || quiz.set !== $("activity").value;
+    const other = quiz.set !== $("activity").value;
+    $("qOpen").textContent = other || quiz.phase === "idle" || quiz.phase === "done" ? "Start"
       : quiz.phase === "open" ? "Next question" : (quiz.q + 1 >= QUIZ.length ? "Finish quiz" : "Next question");
-    $("hostQuizInfo").textContent = quiz.phase === "done" ? "Quiz finished." :
-      quiz.q >= 0 ? `Question ${quiz.q + 1} of ${QUIZ.length}: ${quiz.phase === "open" ? "answers open" : "answer shown"}` : "Quiz not started.";
+    $("hostQuizInfo").textContent = quiz.phase === "done" ? `${SETS[SETKEY].name}: finished.` :
+      quiz.q >= 0 ? `${SETS[SETKEY].name}. Question ${quiz.q + 1} of ${QUIZ.length}: ${quiz.phase === "open" ? "answers open" : "answer shown"}` : "Not started.";
   }
   if (quiz.phase === "done") {
-    panel.hidden = false; $("quizHead").textContent = "Exit quiz";
-    $("quizQ").textContent = HOST ? "Quiz finished." : `Quiz finished. You answered ${score()} of ${QUIZ.length} correctly.`;
+    panel.hidden = false; $("quizHead").textContent = SETS[SETKEY].name;
+    $("quizQ").textContent = HOST ? "Finished." : `Finished. You answered ${score()} of ${QUIZ.length} correctly.`;
     $("quizOpts").innerHTML = ""; $("quizBars").innerHTML = ""; $("quizNote").textContent = "";
     return;
   }
@@ -386,10 +461,10 @@ function renderQuiz() {
   panel.hidden = false;
   panel.parentNode.prepend(panel);
   const Q = QUIZ[quiz.q], reveal = quiz.phase === "reveal";
-  $("quizHead").textContent = `Exit quiz · question ${quiz.q + 1} of ${QUIZ.length}`;
+  $("quizHead").textContent = `${SETS[SETKEY].name} · ${quiz.q + 1} of ${QUIZ.length}`;
   $("quizQ").textContent = Q.q;
   if (HOST) {
-    const m = votes.get(quiz.q) || new Map(); const n = m.size;
+    const m = votes.get(key(quiz.q)) || new Map(); const n = m.size;
     const counts = Q.o.map((_, i) => [...m.values()].filter(a => a === i).length);
     $("quizBars").innerHTML = Q.o.map((o, i) => {
       const pct = n ? Math.round(counts[i] / n * 100) : 0;
@@ -397,7 +472,7 @@ function renderQuiz() {
         <span><span>${"ABCD"[i]}) ${o}</span><b>${counts[i]}</b></span></div>`;
     }).join("") + `<p class="muted">${n} answer${n === 1 ? "" : "s"}</p>`;
   } else {
-    const mine = myAnswers[quiz.q];
+    const mine = myAnswers[key(quiz.q)];
     $("quizOpts").innerHTML = Q.o.map((o, i) => {
       let cls = "opt";
       if (mine === i) cls += " chosen";
@@ -405,15 +480,15 @@ function renderQuiz() {
       return `<button class="${cls}" data-i="${i}" ${reveal ? "disabled" : ""}>${"ABCD"[i]}) ${o}</button>`;
     }).join("");
     $("quizOpts").querySelectorAll("button").forEach(b => b.onclick = () => {
-      const i = +b.dataset.i; myAnswers[quiz.q] = i;
-      client.publish(T("quiz/ans"), JSON.stringify({cid: CID, q: quiz.q, a: i}));
+      const i = +b.dataset.i; myAnswers[key(quiz.q)] = i;
+      client.publish(T("quiz/ans"), JSON.stringify({cid: CID, set: SETKEY, q: quiz.q, a: i}));
       renderQuiz();
     });
     $("quizNote").textContent = reveal ? (mine === Q.a ? "Correct." : mine == null ? "You did not answer this one." : "Not this time. The correct answer is highlighted.")
       : mine == null ? "Tap an answer." : "Answer sent. You can change it until the answer is revealed.";
   }
 }
-function score() { return QUIZ.reduce((s, Q, i) => s + (myAnswers[i] === Q.a ? 1 : 0), 0); }
+function score() { return QUIZ.reduce((s, Q, i) => s + (myAnswers[key(i)] === Q.a ? 1 : 0), 0); }
 </script>
 </body>
 </html>
